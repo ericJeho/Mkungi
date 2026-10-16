@@ -1,0 +1,20 @@
+# Phase 2 adds postgres (job/user data) and redis (conversion queue); see docs/BUILD_CHECKLIST.md.
+services:
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment:
+      MKUNGI_OCR_ENGINE: paddleocr
+      MKUNGI_CORS_ORIGINS: '["http://localhost:3000"]'
+    volumes: ["mkungi-data:/data"]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+
+volumes:
+  mkungi-data:

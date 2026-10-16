@@ -1,0 +1,4 @@
+# Default OCR engine. Large; installed separately so CI and tests stay light.
+paddlepaddle>=2.6
+paddleocr>=2.8,<3
+# Optional fallback engine (needs the tesseract binary): pytesseract>=0.3
