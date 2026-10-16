@@ -17,6 +17,8 @@
 
 ## 1. Supabase
 
+**Done for production:** project `mkungi` (ref `wluzawxnsblsgllpkvrj`, org Jehosoft, region `eu-west-1`), URL `https://wluzawxnsblsgllpkvrj.supabase.co`, with the migration applied. Only step 3 (copy the secret key) is left. The steps below are for setting up another environment, such as staging.
+
 1. Create a project at [supabase.com/dashboard](https://supabase.com/dashboard), in a region close to your users.
 2. Apply the migration in `supabase/migrations/`. It creates the `conversions` table and the private `uploads` (25 MB) and `outputs` buckets. Use either:
    - **CLI:** `npx supabase login && npx supabase link --project-ref <ref> && npx supabase db push`
@@ -32,7 +34,7 @@
 
    | Name | Value |
    |---|---|
-   | `MKUNGI_SUPABASE_URL` | `https://<ref>.supabase.co` |
+   | `MKUNGI_SUPABASE_URL` | `https://wluzawxnsblsgllpkvrj.supabase.co` |
    | `MKUNGI_SUPABASE_SECRET_KEY` | `sb_secret_…` (mark as Sensitive) |
    | `MKUNGI_CORS_ORIGINS` | `["https://<your-web-domain>"]` |
    | `MKUNGI_CORS_ORIGIN_REGEX` | `https://mkungi-web(-[a-z0-9-]+)?\.vercel\.app` (allows preview deployments) |
