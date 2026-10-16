@@ -1,12 +1,12 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
+ && apt-get install -y --no-install-recommends libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt requirements-ocr.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-ocr.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt "uvicorn[standard]>=0.30"
 
 COPY app ./app
 ENV MKUNGI_STORAGE_DIR=/data

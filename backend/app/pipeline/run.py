@@ -26,19 +26,21 @@ class ConversionResult:
     data: bytes
 
 
-def build_layout(data: bytes, filename: str, engine: OCREngine) -> DocumentLayout:
+def build_layout(data: bytes, filename: str, engine: OCREngine, max_pages: int | None = None) -> DocumentLayout:
     pages = []
-    for img in load_pages(data, filename):
+    for img in load_pages(data, filename, max_pages):
         img = enhance(img)
         pages.append(analyse_page(img, engine.read(img)))
     text = "\n".join(ln.text for p in pages for ln in p.lines)
     return DocumentLayout(pages=pages, doc_type=classify(text))
 
 
-def convert(data: bytes, filename: str, output_format: str, engine: OCREngine) -> ConversionResult:
+def convert(
+    data: bytes, filename: str, output_format: str, engine: OCREngine, max_pages: int | None = None
+) -> ConversionResult:
     if output_format not in FORMATS:
         raise ValueError(f"output_format must be one of {sorted(FORMATS)}")
-    layout = build_layout(data, filename, engine)
+    layout = build_layout(data, filename, engine, max_pages)
     fmt = recommended_format(layout.doc_type) if output_format == "auto" else output_format
     out = write_docx(layout) if fmt == "docx" else write_xlsx(layout)
     return ConversionResult(layout=layout, output_format=fmt, data=out)

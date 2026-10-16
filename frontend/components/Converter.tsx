@@ -1,15 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const ACCEPT = ".png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.pdf";
+const MAX_MB = 25;
 
 type Format = "auto" | "docx" | "xlsx";
 
 type Job = {
-  id: string;
-  status: "queued" | "processing" | "done" | "failed";
+  /** Client-side key; the server id arrives once the job is created. */
+  key: string;
+  id?: string;
+  status: "uploading" | "processing" | "done" | "failed";
   filename: string;
   output_format?: "docx" | "xlsx";
   doc_type?: string;
@@ -17,6 +20,11 @@ type Job = {
   tables?: number;
   images?: number;
   error?: string;
+};
+
+type Created = {
+  id: string;
+  upload: { method: string; url: string; headers: Record<string, string> };
 };
 
 const FORMATS: { value: Format; label: string }[] = [
@@ -30,52 +38,55 @@ function label(docType?: string) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API}${path}`, init);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof body.detail === "string" ? body.detail : `Request failed (${res.status})`);
+  return body as T;
+}
+
+/**
+ * create job -> upload the file straight to storage -> run the conversion.
+ * In production the upload URL is a signed Supabase Storage URL, so the file
+ * never passes through the API (Vercel caps request bodies at 4.5 MB).
+ */
+async function convertFile(file: File, format: Format, update: (patch: Partial<Job>) => void) {
+  if (file.size > MAX_MB * 1024 * 1024) throw new Error(`File is larger than ${MAX_MB} MB`);
+  const job = await api<Created>("/v1/conversions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: file.name, output_format: format }),
+  });
+  update({ id: job.id });
+
+  const target = job.upload.url.startsWith("/") ? `${API}${job.upload.url}` : job.upload.url;
+  const put = await fetch(target, { method: job.upload.method, headers: job.upload.headers, body: file });
+  if (!put.ok) throw new Error(`Upload failed (${put.status})`);
+
+  update({ status: "processing" });
+  return api<Job>(`/v1/conversions/${job.id}/process`, { method: "POST" });
+}
+
 export default function Converter() {
   const [format, setFormat] = useState<Format>("auto");
   const [dragging, setDragging] = useState(false);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
   const upload = useCallback(
-    async (files: FileList | File[]) => {
-      setError(null);
+    (files: FileList | File[]) => {
       for (const file of Array.from(files)) {
-        const body = new FormData();
-        body.append("file", file);
-        body.append("output_format", format);
-        try {
-          const res = await fetch(`${API}/v1/conversions`, { method: "POST", body });
-          if (!res.ok) {
-            const detail = await res.json().catch(() => ({}));
-            throw new Error(detail.detail ?? `Upload failed (${res.status})`);
-          }
-          const job: Job = await res.json();
-          setJobs((prev) => [job, ...prev]);
-        } catch (e) {
-          setError(`${file.name}: ${e instanceof Error ? e.message : "upload failed"}`);
-        }
+        const key = crypto.randomUUID();
+        const update = (patch: Partial<Job>) =>
+          setJobs((prev) => prev.map((j) => (j.key === key ? { ...j, ...patch } : j)));
+        setJobs((prev) => [{ key, filename: file.name, status: "uploading" }, ...prev]);
+        convertFile(file, format, update)
+          .then((done) => update({ ...done, key }))
+          .catch((e) => update({ status: "failed", error: e instanceof Error ? e.message : "Conversion failed" }));
       }
     },
     [format],
   );
-
-  // Poll unfinished jobs.
-  useEffect(() => {
-    const pending = jobs.filter((j) => j.status === "queued" || j.status === "processing");
-    if (!pending.length) return;
-    const t = setTimeout(async () => {
-      const updates = await Promise.all(
-        pending.map((j) =>
-          fetch(`${API}/v1/conversions/${j.id}`)
-            .then((r) => r.json() as Promise<Job>)
-            .catch(() => j),
-        ),
-      );
-      setJobs((prev) => prev.map((j) => updates.find((u) => u.id === j.id) ?? j));
-    }, 1000);
-    return () => clearTimeout(t);
-  }, [jobs]);
 
   return (
     <div className="rounded-2xl border border-ink/10 bg-white p-5 shadow-sm sm:p-6">
@@ -127,20 +138,18 @@ export default function Converter() {
         onChange={(e) => e.target.files && upload(e.target.files)}
       />
 
-      {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
-
       {jobs.length > 0 && (
         <ul className="mt-5 divide-y divide-ink/10">
           {jobs.map((job) => (
-            <li key={job.id} className="flex flex-wrap items-center justify-between gap-2 py-3">
+            <li key={job.key} className="flex flex-wrap items-center justify-between gap-2 py-3">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-ink">{job.filename}</p>
                 <p className="text-xs text-ink-soft">
                   {job.status === "done"
                     ? `${label(job.doc_type)} · ${job.pages} page(s) · ${job.tables} table(s) · ${job.images} image(s)`
                     : job.status === "failed"
-                      ? job.error
-                      : job.status === "queued" ? "Queued…" : "Processing…"}
+                      ? <span className="text-red-700">{job.error}</span>
+                      : job.status === "uploading" ? "Uploading…" : "Converting…"}
                 </p>
               </div>
               {job.status === "done" && (

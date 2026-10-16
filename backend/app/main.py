@@ -1,32 +1,38 @@
 """Mkungi API.
 
-Jobs are stored on disk for the MVP (``storage_dir/jobs/<id>/``). Phase 2 of
-docs/BUILD_CHECKLIST.md moves job state to PostgreSQL and the work to a
-Redis-backed worker; the endpoints stay the same.
+A conversion takes three calls, so large files never pass through the API
+(Vercel functions accept at most 4.5 MB per request):
+
+1. ``POST /v1/conversions``            create the job, get an upload target
+2. ``PUT  <upload.url>``               send the file (straight to Supabase Storage in production)
+3. ``POST /v1/conversions/{id}/process`` run the conversion and wait for the result
+
+Then ``GET /v1/conversions/{id}/download`` returns the Word/Excel file.
 """
 
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel
 
 from app.config import settings
 from app.pipeline.ocr import OCREngine, get_engine
-from app.pipeline.run import FORMATS, MEDIA_TYPES, convert
+from app.pipeline.run import MEDIA_TYPES, convert
+from app.storage import INPUT_MEDIA_TYPES, InputMissing, JobNotFound, LocalStore, Store, make_store, now
 
-ALLOWED_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".pdf"}
+ALLOWED_SUFFIXES = set(INPUT_MEDIA_TYPES)
 
-app = FastAPI(title="Mkungi API", version="0.1.0", description="From Paper to Perfectly Editable.")
+app = FastAPI(title="Mkungi API", version="0.2.0", description="From Paper to Perfectly Editable.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
+    allow_origin_regex=settings.cors_origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -37,96 +43,114 @@ def ocr_engine() -> OCREngine:
     return get_engine(settings.ocr_engine, settings.ocr_lang)
 
 
-def _job_dir(job_id: str) -> Path:
+@lru_cache
+def store() -> Store:
+    return make_store(settings)
+
+
+def _get(s: Store, job_id: str) -> dict:
     try:
-        uuid.UUID(job_id)
-    except ValueError:
+        return s.get(job_id)
+    except JobNotFound:
         raise HTTPException(404, "Job not found") from None
-    return settings.storage_dir / "jobs" / job_id
 
 
-def _save_meta(job_dir: Path, meta: dict) -> None:
-    (job_dir / "job.json").write_text(json.dumps(meta, indent=2))
+def _public(job: dict) -> dict:
+    return {k: v for k, v in job.items() if k not in ("input_path", "output_path")}
 
 
-def _load_meta(job_id: str) -> dict:
-    path = _job_dir(job_id) / "job.json"
-    if not path.exists():
-        raise HTTPException(404, "Job not found")
-    return json.loads(path.read_text())
-
-
-def _process(job_dir: Path, data: bytes, filename: str, output_format: str, engine: OCREngine) -> None:
-    meta = json.loads((job_dir / "job.json").read_text())
-    meta["status"] = "processing"
-    _save_meta(job_dir, meta)
-    try:
-        result = convert(data, filename, output_format, engine)
-        out_name = f"{Path(filename).stem}.{result.output_format}"
-        (job_dir / out_name).write_bytes(result.data)
-        meta.update(
-            status="done",
-            output_format=result.output_format,
-            output_file=out_name,
-            doc_type=result.layout.doc_type,
-            pages=len(result.layout.pages),
-            tables=sum(len(p.tables) for p in result.layout.pages),
-            images=sum(len(p.images) for p in result.layout.pages),
-        )
-    except Exception as exc:  # surfaced to the client via job status
-        meta.update(status="failed", error=str(exc))
-    meta["finished_at"] = datetime.now(timezone.utc).isoformat()
-    _save_meta(job_dir, meta)
+class CreateConversion(BaseModel):
+    filename: str
+    output_format: Literal["auto", "docx", "xlsx"] = "auto"
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "ocr_engine": settings.ocr_engine}
+    return {
+        "status": "ok",
+        "ocr_engine": settings.ocr_engine,
+        "storage": "supabase" if settings.supabase_url and settings.supabase_secret_key else "local",
+    }
 
 
-@app.post("/v1/conversions", status_code=202)
-async def create_conversion(
-    background: BackgroundTasks,
-    file: UploadFile = File(...),
-    output_format: str = Form("auto"),
-    engine: OCREngine = Depends(ocr_engine),
-) -> dict:
-    filename = Path(file.filename or "upload").name
-    if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+@app.post("/v1/conversions", status_code=201)
+def create_conversion(body: CreateConversion, s: Store = Depends(store)) -> dict:
+    filename = Path(body.filename).name.strip()
+    if not filename or Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
         raise HTTPException(415, f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_SUFFIXES))}")
-    if output_format not in FORMATS:
-        raise HTTPException(422, f"output_format must be one of {sorted(FORMATS)}")
-    data = await file.read()
+    job = s.create(filename, body.output_format)
+    return {**_public(job), "upload": s.upload_target(job), "max_upload_mb": settings.max_upload_mb}
+
+
+@app.put("/v1/conversions/{job_id}/upload", status_code=204)
+async def upload(job_id: str, request: Request, s: Store = Depends(store)) -> None:
+    """Upload endpoint for local storage. With Supabase, files go straight to Storage."""
+    if not isinstance(s, LocalStore):
+        raise HTTPException(404, "Upload directly to the URL returned when the job was created")
+    _get(s, job_id)
+    data = await request.body()
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"File exceeds {settings.max_upload_mb} MB")
+    try:
+        s.save_upload(job_id, data)
+    except InputMissing as exc:
+        raise HTTPException(409, str(exc)) from None
 
-    job_id = str(uuid.uuid4())
-    job_dir = _job_dir(job_id)
-    job_dir.mkdir(parents=True)
-    meta = {
-        "id": job_id,
-        "status": "queued",
-        "filename": filename,
-        "requested_format": output_format,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _save_meta(job_dir, meta)
-    background.add_task(_process, job_dir, data, filename, output_format, engine)
-    return meta
+
+@app.post("/v1/conversions/{job_id}/process")
+def process(job_id: str, s: Store = Depends(store), engine: OCREngine = Depends(ocr_engine)) -> dict:
+    job = _get(s, job_id)
+    if job["status"] != "awaiting_upload":
+        raise HTTPException(409, f"Job is already {job['status']}")
+    try:
+        data = s.read_input(job)
+    except InputMissing as exc:
+        raise HTTPException(409, str(exc)) from None
+    if len(data) > settings.max_upload_mb * 1024 * 1024:
+        job = s.update(job_id, status="failed", error=f"File exceeds {settings.max_upload_mb} MB", finished_at=now())
+        return _public(job)
+
+    job = s.claim(job_id)
+    if job is None:
+        raise HTTPException(409, "Job is already being processed")
+
+    try:
+        result = convert(data, job["filename"], job["requested_format"], engine, settings.max_pages)
+        out_name = f"{Path(job['filename']).stem}.{result.output_format}"
+        out_path = s.write_output(job, out_name, result.data, MEDIA_TYPES[result.output_format])
+        job = s.update(
+            job_id,
+            status="done",
+            output_format=result.output_format,
+            output_file=out_name,
+            output_path=out_path,
+            doc_type=result.layout.doc_type,
+            pages=len(result.layout.pages),
+            tables=sum(len(p.tables) for p in result.layout.pages),
+            images=sum(len(p.images) for p in result.layout.pages),
+            finished_at=now(),
+        )
+    except Exception as exc:  # reported to the client through the job
+        job = s.update(job_id, status="failed", error=str(exc) or type(exc).__name__, finished_at=now())
+    return _public(job)
 
 
 @app.get("/v1/conversions/{job_id}")
-def get_conversion(job_id: str) -> dict:
-    return _load_meta(job_id)
+def get_conversion(job_id: str, s: Store = Depends(store)) -> dict:
+    return _public(_get(s, job_id))
 
 
-@app.get("/v1/conversions/{job_id}/download")
-def download(job_id: str) -> FileResponse:
-    meta = _load_meta(job_id)
-    if meta["status"] != "done":
-        raise HTTPException(409, f"Job is {meta['status']}")
+@app.get("/v1/conversions/{job_id}/download", response_model=None)
+def download(job_id: str, s: Store = Depends(store)) -> FileResponse | RedirectResponse:
+    job = _get(s, job_id)
+    if job["status"] != "done":
+        raise HTTPException(409, f"Job is {job['status']}")
+    url = s.output_url(job)
+    if url:
+        return RedirectResponse(url, status_code=307)
+    assert isinstance(s, LocalStore)
     return FileResponse(
-        _job_dir(job_id) / meta["output_file"],
-        media_type=MEDIA_TYPES[meta["output_format"]],
-        filename=meta["output_file"],
+        s.output_file(job),
+        media_type=MEDIA_TYPES[job["output_format"]],
+        filename=job["output_file"],
     )

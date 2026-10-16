@@ -17,6 +17,33 @@ class OCREngine(Protocol):
         ...
 
 
+class RapidOCREngine:
+    """PaddleOCR's PP-OCR models on ONNX Runtime: same accuracy, a fraction of the size.
+
+    The models ship inside the rapidocr wheel, so nothing is downloaded at runtime.
+    """
+
+    name = "rapidocr"
+
+    def __init__(self) -> None:
+        from rapidocr import RapidOCR
+
+        self._ocr = RapidOCR(params={"Global.log_level": "warning"})
+
+    def read(self, img: np.ndarray) -> list[TextLine]:
+        result = self._ocr(img)
+        if result.boxes is None or result.txts is None:
+            return []
+        h, w = img.shape[:2]
+        lines = []
+        for quad, text, conf in zip(result.boxes, result.txts, result.scores):
+            xs = [int(p[0]) for p in quad]
+            ys = [int(p[1]) for p in quad]
+            bbox = BBox(max(0, min(xs)), max(0, min(ys)), min(w, max(xs)), min(h, max(ys)))
+            lines.append(TextLine(text=text, bbox=bbox, confidence=float(conf)))
+        return lines
+
+
 class PaddleOCREngine:
     """PaddleOCR adapter. Imported lazily: the dependency is large."""
 
@@ -69,6 +96,8 @@ class TesseractEngine:
 
 
 def get_engine(name: str, lang: str = "en") -> OCREngine:
+    if name == "rapidocr":
+        return RapidOCREngine()
     if name == "paddleocr":
         return PaddleOCREngine(lang)
     if name == "tesseract":

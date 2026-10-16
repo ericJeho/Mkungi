@@ -1,4 +1,5 @@
-# Default OCR engine. Large; installed separately so CI and tests stay light.
+# Optional engines for self-hosted/GPU servers (MKUNGI_OCR_ENGINE=paddleocr or tesseract).
+# Not used on Vercel.
 paddlepaddle>=2.6
 paddleocr>=2.8,<3
-# Optional fallback engine (needs the tesseract binary): pytesseract>=0.3
+# pytesseract>=0.3   # plus the tesseract binary

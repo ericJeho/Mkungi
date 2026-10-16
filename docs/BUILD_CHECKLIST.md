@@ -24,14 +24,14 @@ Source: the Mkungi product brief ([PRODUCT.md](PRODUCT.md)). Each phase ends wit
 
 - [x] Repository layout: `backend/` (FastAPI), `frontend/` (Next.js + Tailwind + TypeScript), `docs/`
 - [x] Layout model: pages → text lines (with bold/colour), tables (with merged cells), image regions (logo / signature / stamp / code / picture)
-- [x] Image enhancement: deskew + denoise (OpenCV), multi-page TIFF, PDF rasterising (PyMuPDF)
-- [x] OCR engine interface with PaddleOCR (default) and Tesseract (fallback) adapters
+- [x] Image enhancement: deskew + denoise (OpenCV), multi-page TIFF, PDF rendering at 300 dpi (pdfium)
+- [x] OCR engine interface: RapidOCR (PaddleOCR PP-OCR models on ONNX Runtime, default), PaddleOCR and Tesseract
 - [x] Ruled-table detection with column-span merging (OpenCV morphology)
 - [x] Non-text region detection and classification (logo, stamp, signature, QR/barcode)
 - [x] Mkungi AI v0: keyword document-type classifier for all 13 template types; auto-picks Word or Excel
 - [x] Word writer: page size, indents, tab stops, alignment, spacing, font size/bold/colour, bordered tables, pictures
 - [x] Excel writer: one sheet per page, bordered/merged tables, numbers stored as numbers
-- [x] API: `POST /v1/conversions`, `GET /v1/conversions/{id}`, `GET /v1/conversions/{id}/download`
+- [x] API: create job → upload → process → download (`/v1/conversions…`)
 - [x] Web app: drag-and-drop, batch upload, Auto/Word/Excel choice, live status, download
 - [x] Tests on a synthetic invoice; Docker images; docker-compose
 
@@ -57,15 +57,19 @@ Source: the Mkungi product brief ([PRODUCT.md](PRODUCT.md)). Each phase ends wit
 
 ## Phase 2 — Production platform
 
-- [ ] PostgreSQL for users, organisations, jobs and documents (replace on-disk job files)
-- [ ] Redis queue + worker processes for conversion (API returns immediately; workers scale separately)
-- [ ] Object storage (S3 / Azure Blob / GCS) with encryption at rest and a retention policy
+- [x] Supabase Postgres for conversion jobs (`supabase/migrations/`), RLS on, secret key only on the server
+- [x] Supabase Storage: private `uploads` / `outputs` buckets; browser uploads via signed URLs, downloads via 5-minute signed URLs
+- [x] Deployment: Vercel projects for `frontend/` (Next.js) and `backend/` (Python function), see [DEPLOYMENT.md](DEPLOYMENT.md)
+- [ ] Supabase Auth: sign-in, and jobs owned by a user (`user_id` + RLS policies)
+- [ ] Per-user quotas so public traffic can't exhaust Vercel compute
+- [ ] Retention: scheduled deletion of uploads and outputs after N days
+- [ ] Background workers for long documents (> 20 pages or > 300 s): a queue (Supabase Queues / pgmq) and a worker outside Vercel
 - [ ] Accounts, organisations and teams; roles (owner, admin, member)
 - [ ] API keys, per-key rate limits and usage metering
 - [ ] Batch upload as a single job with a ZIP download
 - [ ] Audit log: who uploaded, converted, downloaded or deleted what, and when
 - [ ] Observability: structured logs, metrics, error tracking, per-stage timings
-- [ ] Deployment: containers on the chosen cloud, CI/CD, staging and production
+- [ ] Staging Supabase project + Vercel preview environment wired to it
 
 **Gate:** a pilot organisation runs 1,000 pages through the platform without manual intervention.
 

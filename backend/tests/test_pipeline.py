@@ -1,11 +1,9 @@
 import io
-import time
 
 import cv2
 import numpy as np
 import pytest
 from docx import Document
-from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from app.models import BBox, ImageKind, TextLine
@@ -128,32 +126,34 @@ def test_convert_xlsx_numbers(invoice_png):
     assert any(str(r).startswith("A") for r in ws.merged_cells.ranges)
 
 
-def test_api_roundtrip(invoice_png, tmp_path, monkeypatch):
-    from app import main
 
-    monkeypatch.setattr(main.settings, "storage_dir", tmp_path)
-    main.app.dependency_overrides[main.ocr_engine] = FakeEngine
-    try:
-        client = TestClient(main.app)
-        r = client.post(
-            "/v1/conversions",
-            files={"file": ("invoice.png", invoice_png, "image/png")},
-            data={"output_format": "docx"},
-        )
-        assert r.status_code == 202, r.text
-        job_id = r.json()["id"]
-        for _ in range(50):
-            meta = client.get(f"/v1/conversions/{job_id}").json()
-            if meta["status"] in ("done", "failed"):
-                break
-            time.sleep(0.1)
-        assert meta["status"] == "done", meta
-        assert meta["doc_type"] == "invoice" and meta["tables"] == 1
-        dl = client.get(f"/v1/conversions/{job_id}/download")
-        assert dl.status_code == 200
-        Document(io.BytesIO(dl.content))
+def test_pdf_input_and_page_limit():
+    pdfium = pytest.importorskip("pypdfium2")
+    from PIL import Image
 
-        assert client.post("/v1/conversions", files={"file": ("x.exe", b"MZ", "application/octet-stream")}).status_code == 415
-        assert client.get("/v1/conversions/not-a-uuid").status_code == 404
-    finally:
-        main.app.dependency_overrides.clear()
+    from app.pipeline.preprocess import load_pages
+
+    buf = io.BytesIO()
+    page = Image.fromarray(cv2.cvtColor(_invoice_image(), cv2.COLOR_BGR2RGB))
+    page.save(buf, format="PDF", save_all=True, append_images=[page], resolution=150)
+    pages = load_pages(buf.getvalue(), "scan.pdf")
+    assert len(pages) == 2 and pages[0].shape[1] > 2000  # rendered at 300 dpi
+    with pytest.raises(ValueError, match="limit is 1"):
+        load_pages(buf.getvalue(), "scan.pdf", max_pages=1)
+    assert pdfium  # imported for the skip check
+
+
+def test_rapidocr_reads_the_invoice():
+    """The production engine, end to end, on the synthetic invoice."""
+    pytest.importorskip("rapidocr")
+    from app.pipeline.ocr import RapidOCREngine
+
+    lines = RapidOCREngine().read(_invoice_image())
+    text = " ".join(ln.text for ln in lines)
+    for expected in ("TAX INVOICE", "48,000.00", "Toner", "Paper A4"):
+        assert expected in text, text
+    ok, buf = cv2.imencode(".png", _invoice_image())
+    result = convert(buf.tobytes(), "invoice.png", "docx", RapidOCREngine())
+    assert result.layout.doc_type == "invoice"
+    table = Document(io.BytesIO(result.data)).tables[0]
+    assert table.cell(3, 2).text == "48,000.00"

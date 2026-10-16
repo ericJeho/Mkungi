@@ -9,34 +9,43 @@ import numpy as np
 from PIL import Image
 
 
-def load_pages(data: bytes, filename: str) -> list[np.ndarray]:
+def load_pages(data: bytes, filename: str, max_pages: int | None = None) -> list[np.ndarray]:
     """Decode an upload into BGR page images.
 
-    Images are decoded with Pillow (multi-frame TIFFs give one page per frame).
-    PDFs are rasterised with PyMuPDF when it is installed.
+    PDFs are rendered at 300 dpi with pdfium; images are decoded with Pillow
+    (multi-frame TIFFs give one page per frame).
     """
     if filename.lower().endswith(".pdf"):
+        import pypdfium2 as pdfium
+
         try:
-            import fitz  # PyMuPDF
-        except ImportError as exc:  # pragma: no cover - optional dependency
-            raise ValueError("PDF input needs PyMuPDF: pip install pymupdf") from exc
+            pdf = pdfium.PdfDocument(data)
+        except pdfium.PdfiumError as exc:
+            raise ValueError(f"Unsupported or corrupt PDF: {filename}") from exc
+        _check_pages(len(pdf), max_pages)
         pages = []
-        with fitz.open(stream=data, filetype="pdf") as pdf:
-            for page in pdf:
-                pix = page.get_pixmap(dpi=300)
-                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-                pages.append(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR if pix.n == 3 else cv2.COLOR_RGBA2BGR))
+        for page in pdf:
+            pil = page.render(scale=300 / 72).to_pil().convert("RGB")
+            pages.append(cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR))
+        pdf.close()
         return pages
 
     try:
         img = Image.open(io.BytesIO(data))
     except Exception as exc:
         raise ValueError(f"Unsupported or corrupt file: {filename}") from exc
+    n = getattr(img, "n_frames", 1)
+    _check_pages(n, max_pages)
     pages = []
-    for i in range(getattr(img, "n_frames", 1)):
+    for i in range(n):
         img.seek(i)
         pages.append(cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR))
     return pages
+
+
+def _check_pages(n: int, max_pages: int | None) -> None:
+    if max_pages and n > max_pages:
+        raise ValueError(f"Document has {n} pages; the limit is {max_pages}")
 
 
 def estimate_skew(gray: np.ndarray) -> float:

@@ -1,11 +1,14 @@
-# Phase 2 adds postgres (job/user data) and redis (conversion queue); see docs/BUILD_CHECKLIST.md.
+# Local, all-in-Docker run with jobs and files on a volume.
+# Production uses Supabase + Vercel instead; see docs/DEPLOYMENT.md.
 services:
   api:
     build: ./backend
     ports: ["8000:8000"]
     environment:
-      MKUNGI_OCR_ENGINE: paddleocr
       MKUNGI_CORS_ORIGINS: '["http://localhost:3000"]'
+      # To use a Supabase project instead of the volume, set:
+      # MKUNGI_SUPABASE_URL: https://<ref>.supabase.co
+      # MKUNGI_SUPABASE_SECRET_KEY: sb_secret_...
     volumes: ["mkungi-data:/data"]
 
   web:
