@@ -49,8 +49,27 @@
 
 1. Import the same repo again as a second project, e.g. `mkungi-web`.
 2. **Root Directory:** `frontend`. **Framework Preset:** Next.js.
-3. Environment variable: `NEXT_PUBLIC_API_URL` = `https://<api-domain>`.
+3. Environment variables:
+
+   | Name | Value |
+   |---|---|
+   | `NEXT_PUBLIC_API_URL` | `https://<api-domain>` |
+   | `NEXT_PUBLIC_SUPABASE_URL` | `https://wluzawxnsblsgllpkvrj.supabase.co` |
+   | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | the `sb_publishable_…` key from *Project Settings → API Keys* (safe in the browser: RLS blocks it from all Mkungi data) |
+
 4. Deploy, then add your custom domains (e.g. `mkungi.com` for the web app, `api.mkungi.com` for the API) and update `MKUNGI_CORS_ORIGINS` to match.
+
+## 4. Supabase Auth (sign-in)
+
+Users sign in with an emailed magic link. Converting requires an account; the landing page stays public. Each conversion belongs to the account that made it, and the API returns "not found" for anyone else's.
+
+1. *Authentication → URL Configuration*:
+   - **Site URL:** your web app's address, e.g. `https://mkungi.com` (or the `mkungi-web` Vercel URL until you have a domain).
+   - **Redirect URLs:** add the same address, `http://localhost:3000`, and `https://mkungi-web-*.vercel.app` for preview deployments. The magic link only sends people back to addresses on this list.
+2. **Set up custom SMTP before inviting real users.** Supabase's built-in email sender only delivers to members of your Supabase organization, and only a few emails an hour. Under *Authentication → Emails → SMTP Settings*, add a provider such as Resend, Postmark, Amazon SES or Brevo, sending from an address on your own domain.
+3. Optional: under *Authentication → Emails → Templates*, brand the "Magic Link" and "Confirm signup" emails with the Mkungi name.
+
+The browser verifies the link with PKCE, so it must be opened in the same browser that asked for it. The sign-in form says so.
 
 In both projects, turn on *Settings → Git → Ignored Build Step → "Only build if there are changes in the root directory"*, so a frontend-only commit doesn't redeploy the API.
 
@@ -68,7 +87,7 @@ In both projects, turn on *Settings → Git → Ignored Build Step → "Only bui
 ## Before opening it to the public
 
 - **Abuse limit and retention are built in:** 30 conversions per visitor per hour, and a daily Vercel Cron job deletes jobs and files older than 24 hours. The clean-up only runs if `CRON_SECRET` is set.
-- **Sign-in** is still to do (build checklist, phase 2). Until then anyone can convert within the hourly limit, and anyone holding a job id can fetch its result until the clean-up removes it. Job ids are random UUIDs, and downloads use 5-minute signed URLs.
+- **Sign-in is built in:** converting needs an account, jobs are private to their owner, and the hourly limit applies per account. Before real users arrive, set up custom SMTP (step 4). Without it, sign-in emails only reach your own team.
 
 ## Local development
 

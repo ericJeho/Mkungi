@@ -35,5 +35,17 @@ class Settings(BaseSettings):
     supabase_output_bucket: str = "outputs"
     storage_dir: Path = Path("./storage")
 
+    # Sign-in. None means "required whenever Supabase is configured", so
+    # local development without Supabase keeps working without accounts.
+    require_auth: bool | None = None
+
+    @property
+    def supabase_enabled(self) -> bool:
+        return bool(self.supabase_url and self.supabase_secret_key)
+
+    @property
+    def auth_required(self) -> bool:
+        return self.supabase_enabled if self.require_auth is None else self.require_auth
+
 
 settings = Settings()

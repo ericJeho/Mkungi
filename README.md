@@ -63,7 +63,7 @@ OCR defaults to RapidOCR (PaddleOCR's PP-OCR models on ONNX Runtime; small enoug
 
 ## API
 
-A conversion is three calls, so large files go straight to storage and never through the API:
+A conversion is three calls, so large files go straight to storage and never through the API. With sign-in on (the default whenever Supabase is configured), add `-H "Authorization: Bearer <supabase session token>"` to each call. Jobs are only visible to the account that created them.
 
 ```bash
 API=http://localhost:8000
@@ -79,7 +79,8 @@ curl -X PUT "<upload.url>" -H 'Content-Type: application/pdf' --data-binary @inv
 # 3. Convert (waits for the result: status, doc_type, pages, tables, images)
 curl -s -X POST $API/v1/conversions/<id>/process
 
-curl -sLOJ $API/v1/conversions/<id>/download   # redirects to a 5-minute signed URL
+curl -s $API/v1/conversions/<id>/download-url  # {"url": 5-minute signed link, "filename": ...}
+curl -s $API/v1/conversions                     # your conversions from the last 24 hours
 ```
 
 ## Tests

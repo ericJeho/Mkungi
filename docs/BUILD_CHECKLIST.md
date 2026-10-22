@@ -60,7 +60,9 @@ Source: the Mkungi product brief ([PRODUCT.md](PRODUCT.md)). Each phase ends wit
 - [x] Supabase Postgres for conversion jobs (`supabase/migrations/`), RLS on, secret key only on the server
 - [x] Supabase Storage: private `uploads` / `outputs` buckets; browser uploads via signed URLs, downloads via 5-minute signed URLs
 - [x] Deployment: Vercel projects for `frontend/` (Next.js) and `backend/` (Python function), see [DEPLOYMENT.md](DEPLOYMENT.md)
-- [ ] Supabase Auth: sign-in, and jobs owned by a user (`user_id` + RLS policies)
+- [x] Supabase Auth: email magic-link sign-in (PKCE); conversions owned by a user (`user_id`), enforced by the API on every request; per-account rate limit; "Your conversions" list
+- [ ] Custom SMTP for sign-in emails (the built-in sender only reaches the Supabase organization's own members)
+- [ ] Google / Microsoft sign-in (needs OAuth apps in Google Cloud / Entra ID)
 - [x] Per-visitor rate limit (30 conversions/hour on a salted IP hash) so public traffic can't exhaust Vercel compute; per-user quotas follow sign-in
 - [x] Retention: daily Vercel Cron deletes jobs, uploads and outputs older than 24 hours
 - [ ] Background workers for long documents (> 20 pages or > 300 s): a queue (Supabase Queues / pgmq) and a worker outside Vercel

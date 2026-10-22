@@ -50,7 +50,8 @@ class FakeSupabase:
             }
             rows = [r for r in rows if tests[op](r.get(col))]
         if "order" in q:
-            rows.sort(key=lambda r: r[q["order"].split(".")[0]])
+            col, _, direction = q["order"].partition(".")
+            rows.sort(key=lambda r: r[col], reverse=direction == "desc")
         return rows[: int(q["limit"])] if "limit" in q else rows
 
     def handler(self, request: httpx.Request) -> httpx.Response:

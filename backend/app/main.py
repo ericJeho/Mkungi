@@ -7,7 +7,12 @@ A conversion takes three calls, so large files never pass through the API
 2. ``PUT  <upload.url>``               send the file (straight to Supabase Storage in production)
 3. ``POST /v1/conversions/{id}/process`` run the conversion and wait for the result
 
-Then ``GET /v1/conversions/{id}/download`` returns the Word/Excel file.
+Then ``GET /v1/conversions/{id}/download-url`` gives a short-lived link to the
+Word/Excel file.
+
+When sign-in is on (the default with Supabase), every call needs the user's
+Supabase session token as ``Authorization: Bearer <token>``, and a job is only
+visible to the user who created it.
 """
 
 from __future__ import annotations
@@ -26,14 +31,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel
 
+from app.auth import InvalidToken, SupabaseAuth, User
 from app.config import settings
 from app.pipeline.ocr import OCREngine, get_engine
 from app.pipeline.run import MEDIA_TYPES, convert
 from app.storage import INPUT_MEDIA_TYPES, InputMissing, JobNotFound, LocalStore, Store, make_store, now
 
 ALLOWED_SUFFIXES = set(INPUT_MEDIA_TYPES)
+PRIVATE_FIELDS = ("input_path", "output_path", "client_hash", "user_id")
 
-app = FastAPI(title="Mkungi API", version="0.2.0", description="From Paper to Perfectly Editable.")
+app = FastAPI(title="Mkungi API", version="0.3.0", description="From Paper to Perfectly Editable.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -53,30 +60,59 @@ def store() -> Store:
     return make_store(settings)
 
 
-def _get(s: Store, job_id: str) -> dict:
+@lru_cache
+def auth() -> SupabaseAuth | None:
+    if not settings.auth_required:
+        return None
+    if not settings.supabase_enabled:
+        raise RuntimeError("Sign-in needs MKUNGI_SUPABASE_URL and MKUNGI_SUPABASE_SECRET_KEY")
+    return SupabaseAuth(settings.supabase_url, settings.supabase_secret_key)
+
+
+def current_user(request: Request, verifier: SupabaseAuth | None = Depends(auth)) -> User | None:
+    """The signed-in user, or None when sign-in is turned off."""
+    if verifier is None:
+        return None
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(401, "Sign in to convert documents", headers={"WWW-Authenticate": "Bearer"})
     try:
-        return s.get(job_id)
+        return verifier.verify(token)
+    except InvalidToken:
+        raise HTTPException(401, "Your session has expired. Please sign in again.") from None
+
+
+def _get(s: Store, job_id: str, user: User | None) -> dict:
+    """Load a job the caller may see. Someone else's job looks exactly like a missing one."""
+    try:
+        job = s.get(job_id)
     except JobNotFound:
         raise HTTPException(404, "Job not found") from None
+    if user is not None and job.get("user_id") != user.id:
+        raise HTTPException(404, "Job not found")
+    return job
 
 
 def _public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("input_path", "output_path", "client_hash")}
+    return {k: v for k, v in job.items() if k not in PRIVATE_FIELDS}
 
 
 def _ago(hours: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
-def client_hash(request: Request) -> str:
-    """A salted hash of the visitor's IP: enough to rate-limit, without storing the IP.
+def client_hash(request: Request, user: User | None = None) -> str:
+    """Rate-limit key: the account when signed in, else a salted hash of the IP.
 
     On Vercel the edge sets x-real-ip itself, so it can't be spoofed by the client.
     Elsewhere the socket address is used (put a trusted proxy in front if needed).
     """
-    ip = request.headers.get("x-real-ip") if os.getenv("VERCEL") else None
-    ip = ip or (request.client.host if request.client else "unknown")
-    return hashlib.sha256(f"{settings.ip_hash_salt}:{ip}".encode()).hexdigest()[:32]
+    if user is not None:
+        subject = f"user:{user.id}"
+    else:
+        ip = request.headers.get("x-real-ip") if os.getenv("VERCEL") else None
+        subject = ip or (request.client.host if request.client else "unknown")
+    return hashlib.sha256(f"{settings.ip_hash_salt}:{subject}".encode()).hexdigest()[:32]
 
 
 class CreateConversion(BaseModel):
@@ -89,16 +125,27 @@ def health() -> dict:
     return {
         "status": "ok",
         "ocr_engine": settings.ocr_engine,
-        "storage": "supabase" if settings.supabase_url and settings.supabase_secret_key else "local",
+        "storage": "supabase" if settings.supabase_enabled else "local",
+        "auth": "required" if settings.auth_required else "off",
     }
 
 
+@app.get("/v1/me")
+def me(user: User | None = Depends(current_user)) -> dict:
+    return {"id": user.id, "email": user.email} if user else {"id": None, "email": None}
+
+
 @app.post("/v1/conversions", status_code=201)
-def create_conversion(body: CreateConversion, request: Request, s: Store = Depends(store)) -> dict:
+def create_conversion(
+    body: CreateConversion,
+    request: Request,
+    s: Store = Depends(store),
+    user: User | None = Depends(current_user),
+) -> dict:
     filename = Path(body.filename).name.strip()
     if not filename or Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
         raise HTTPException(415, f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_SUFFIXES))}")
-    who = client_hash(request)
+    who = client_hash(request, user)
     limit = settings.max_conversions_per_hour
     if limit and s.count_recent(who, _ago(1), limit) >= limit:
         raise HTTPException(
@@ -106,7 +153,7 @@ def create_conversion(body: CreateConversion, request: Request, s: Store = Depen
             f"You've reached the limit of {limit} conversions per hour. Please try again later.",
             headers={"Retry-After": "3600"},
         )
-    job = s.create(filename, body.output_format, who)
+    job = s.create(filename, body.output_format, who, user.id if user else None)
     return {
         **_public(job),
         "upload": s.upload_target(job),
@@ -115,12 +162,22 @@ def create_conversion(body: CreateConversion, request: Request, s: Store = Depen
     }
 
 
+@app.get("/v1/conversions")
+def list_conversions(s: Store = Depends(store), user: User | None = Depends(current_user)) -> list[dict]:
+    """The signed-in user's conversions (files are kept for retention_hours)."""
+    if user is None:
+        raise HTTPException(400, "Listing conversions needs sign-in, which is turned off")
+    return [_public(j) for j in s.list_for_user(user.id, 50)]
+
+
 @app.put("/v1/conversions/{job_id}/upload", status_code=204)
-async def upload(job_id: str, request: Request, s: Store = Depends(store)) -> None:
+async def upload(
+    job_id: str, request: Request, s: Store = Depends(store), user: User | None = Depends(current_user)
+) -> None:
     """Upload endpoint for local storage. With Supabase, files go straight to Storage."""
     if not isinstance(s, LocalStore):
         raise HTTPException(404, "Upload directly to the URL returned when the job was created")
-    _get(s, job_id)
+    _get(s, job_id, user)
     data = await request.body()
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"File exceeds {settings.max_upload_mb} MB")
@@ -131,8 +188,13 @@ async def upload(job_id: str, request: Request, s: Store = Depends(store)) -> No
 
 
 @app.post("/v1/conversions/{job_id}/process")
-def process(job_id: str, s: Store = Depends(store), engine: OCREngine = Depends(ocr_engine)) -> dict:
-    job = _get(s, job_id)
+def process(
+    job_id: str,
+    s: Store = Depends(store),
+    engine: OCREngine = Depends(ocr_engine),
+    user: User | None = Depends(current_user),
+) -> dict:
+    job = _get(s, job_id, user)
     if job["status"] != "awaiting_upload":
         raise HTTPException(409, f"Job is already {job['status']}")
     try:
@@ -169,15 +231,33 @@ def process(job_id: str, s: Store = Depends(store), engine: OCREngine = Depends(
 
 
 @app.get("/v1/conversions/{job_id}")
-def get_conversion(job_id: str, s: Store = Depends(store)) -> dict:
-    return _public(_get(s, job_id))
+def get_conversion(job_id: str, s: Store = Depends(store), user: User | None = Depends(current_user)) -> dict:
+    return _public(_get(s, job_id, user))
+
+
+def _done(s: Store, job_id: str, user: User | None) -> dict:
+    job = _get(s, job_id, user)
+    if job["status"] != "done":
+        raise HTTPException(409, f"Job is {job['status']}")
+    return job
+
+
+@app.get("/v1/conversions/{job_id}/download-url")
+def download_url(job_id: str, s: Store = Depends(store), user: User | None = Depends(current_user)) -> dict:
+    """A link the browser can open directly (it can't attach the sign-in token to a plain link).
+
+    With Supabase this is a 5-minute signed Storage URL; locally (no sign-in) it's the download endpoint.
+    """
+    job = _done(s, job_id, user)
+    url = s.output_url(job) or f"/v1/conversions/{job_id}/download"
+    return {"url": url, "filename": job["output_file"]}
 
 
 @app.get("/v1/conversions/{job_id}/download", response_model=None)
-def download(job_id: str, s: Store = Depends(store)) -> FileResponse | RedirectResponse:
-    job = _get(s, job_id)
-    if job["status"] != "done":
-        raise HTTPException(409, f"Job is {job['status']}")
+def download(
+    job_id: str, s: Store = Depends(store), user: User | None = Depends(current_user)
+) -> FileResponse | RedirectResponse:
+    job = _done(s, job_id, user)
     url = s.output_url(job)
     if url:
         return RedirectResponse(url, status_code=307)

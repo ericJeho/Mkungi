@@ -35,7 +35,13 @@ def now() -> str:
 
 
 class Store(Protocol):
-    def create(self, filename: str, requested_format: str, client_hash: str | None = None) -> dict: ...
+    def create(
+        self, filename: str, requested_format: str, client_hash: str | None = None, user_id: str | None = None
+    ) -> dict: ...
+
+    def list_for_user(self, user_id: str, limit: int) -> list[dict]:
+        """The user's jobs, newest first."""
+        ...
 
     def count_recent(self, client_hash: str, since: str, cap: int) -> int:
         """Jobs this client created since ``since`` (ISO time), counting at most ``cap``."""
@@ -104,7 +110,9 @@ class LocalStore:
         (self._dir(job["id"]) / "job.json").write_text(json.dumps(job, indent=2))
         return job
 
-    def create(self, filename: str, requested_format: str, client_hash: str | None = None) -> dict:
+    def create(
+        self, filename: str, requested_format: str, client_hash: str | None = None, user_id: str | None = None
+    ) -> dict:
         job_id = str(uuid.uuid4())
         self._dir(job_id).mkdir(parents=True)
         return self._save(
@@ -115,12 +123,17 @@ class LocalStore:
                 "requested_format": requested_format,
                 "input_path": _input_path(job_id, filename),
                 "client_hash": client_hash,
+                "user_id": user_id,
                 "created_at": now(),
             }
         )
 
     def _all(self) -> list[dict]:
         return [json.loads(p.read_text()) for p in (self.root / "jobs").glob("*/job.json")]
+
+    def list_for_user(self, user_id: str, limit: int) -> list[dict]:
+        mine = [j for j in self._all() if j.get("user_id") == user_id]
+        return sorted(mine, key=lambda j: j["created_at"], reverse=True)[:limit]
 
     def count_recent(self, client_hash: str, since: str, cap: int) -> int:
         return min(cap, sum(1 for j in self._all() if j.get("client_hash") == client_hash and j["created_at"] >= since))
@@ -207,7 +220,9 @@ class SupabaseStore:
         except ValueError:
             raise JobNotFound(job_id) from None
 
-    def create(self, filename: str, requested_format: str, client_hash: str | None = None) -> dict:
+    def create(
+        self, filename: str, requested_format: str, client_hash: str | None = None, user_id: str | None = None
+    ) -> dict:
         job_id = str(uuid.uuid4())
         rows = self._rest(
             "POST",
@@ -218,9 +233,14 @@ class SupabaseStore:
                 "requested_format": requested_format,
                 "input_path": _input_path(job_id, filename),
                 "client_hash": client_hash,
+                "user_id": user_id,
             },
         )
         return rows[0]
+
+    def list_for_user(self, user_id: str, limit: int) -> list[dict]:
+        params = {"user_id": f"eq.{user_id}", "select": "*", "order": "created_at.desc", "limit": str(limit)}
+        return self._rest("GET", params=params)
 
     def count_recent(self, client_hash: str, since: str, cap: int) -> int:
         params = {"client_hash": f"eq.{client_hash}", "created_at": f"gte.{since}", "select": "id", "limit": str(cap)}
