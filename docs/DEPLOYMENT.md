@@ -18,7 +18,7 @@
 ## Fastest: one-click deployment with GitHub Actions
 
 `.github/workflows/deploy.yml` does a complete deployment:
-- Creates (or updates) the `mkungi-api` and `mkungi-web` Vercel projects.
+- Creates (or updates) the `mkungi-api` and `mkungi-frontend` Vercel projects.
 - Sets every environment variable, generating `CRON_SECRET` and the IP-hash salt on the first run.
 - Makes both projects public.
 - Deploys the API and checks `/health`.
@@ -64,7 +64,7 @@ The rest of this guide covers doing the same steps by hand in the dashboards.
    | `MKUNGI_SUPABASE_URL` | `https://wluzawxnsblsgllpkvrj.supabase.co` |
    | `MKUNGI_SUPABASE_SECRET_KEY` | `sb_secret_…` (mark as Sensitive) |
    | `MKUNGI_CORS_ORIGINS` | `["https://<your-web-domain>"]` |
-   | `MKUNGI_CORS_ORIGIN_REGEX` | `https://mkungi-web(-[a-z0-9-]+)?\.vercel\.app` (allows preview deployments) |
+   | `MKUNGI_CORS_ORIGIN_REGEX` | `https://mkungi-frontend(-[a-z0-9-]+)?\.vercel\.app` (allows preview deployments) |
    | `CRON_SECRET` | a long random string, e.g. `openssl rand -hex 32` (Vercel sends it to the daily clean-up) |
    | `MKUNGI_IP_HASH_SALT` | another random string (salts the visitor hash used for rate limiting) |
 
@@ -74,7 +74,7 @@ The rest of this guide covers doing the same steps by hand in the dashboards.
 
 ## 3. Vercel: web project
 
-1. Import the same repo again as a second project, e.g. `mkungi-web`.
+1. Import the same repo again as a second project, e.g. `mkungi-frontend`.
 2. **Root Directory:** `frontend`. **Framework Preset:** Next.js.
 3. Environment variables:
 
@@ -91,8 +91,8 @@ The rest of this guide covers doing the same steps by hand in the dashboards.
 Users sign in with an emailed magic link. Converting requires an account; the landing page stays public. Each conversion belongs to the account that made it, and the API returns "not found" for anyone else's.
 
 1. *Authentication → URL Configuration*:
-   - **Site URL:** your web app's address, e.g. `https://mkungi.com` (or the `mkungi-web` Vercel URL until you have a domain).
-   - **Redirect URLs:** add the same address, `http://localhost:3000`, and `https://mkungi-web-*.vercel.app` for preview deployments. The magic link only sends people back to addresses on this list.
+   - **Site URL:** your web app's address, e.g. `https://mkungi.com` (or the `mkungi-frontend` Vercel URL until you have a domain).
+   - **Redirect URLs:** add the same address, `http://localhost:3000`, and `https://mkungi-frontend-*.vercel.app` for preview deployments. The magic link only sends people back to addresses on this list.
 2. **Set up custom SMTP before inviting real users.** Supabase's built-in email sender only delivers to members of your Supabase organization, and only a few emails an hour. Under *Authentication → Emails → SMTP Settings*, add a provider such as Resend, Postmark, Amazon SES or Brevo, sending from an address on your own domain.
 3. Optional: under *Authentication → Emails → Templates*, brand the "Magic Link" and "Confirm signup" emails with the Mkungi name.
 

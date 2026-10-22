@@ -2,7 +2,7 @@ name: Deploy
 
 # Full production deployment to Vercel, wired to the mkungi Supabase project:
 #   1. API  (backend/)  -> Vercel project "mkungi-api"  (Python function)
-#   2. Web  (frontend/) -> Vercel project "mkungi-web"  (Next.js)
+#   2. Web  (frontend/) -> Vercel project "mkungi-frontend"  (Next.js)
 #   3. Supabase Auth redirect URLs (optional, needs SUPABASE_ACCESS_TOKEN)
 # Creates the projects on first run; later runs update them. Safe to re-run.
 #
@@ -24,7 +24,7 @@ concurrency:
 env:
   VERCEL_CLI: vercel@62.7.0
   API_PROJECT: mkungi-api
-  WEB_PROJECT: mkungi-web
+  WEB_PROJECT: mkungi-frontend
   SUPABASE_REF: wluzawxnsblsgllpkvrj
   SUPABASE_URL: https://wluzawxnsblsgllpkvrj.supabase.co
   # Publishable key: meant for browsers; RLS keeps it away from all Mkungi data.
