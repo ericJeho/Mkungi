@@ -15,6 +15,33 @@
 - OCR uses **RapidOCR**: PaddleOCR's PP-OCR models run on ONNX Runtime. The whole backend bundle is about 380 MB, under Vercel's 500 MB limit for Python functions. PaddlePaddle itself does not fit.
 - Only the API holds the Supabase **secret key**. The table has row-level security with no policies, and both buckets are private, so the publishable key can't read anything.
 
+## Fastest: one-click deployment with GitHub Actions
+
+`.github/workflows/deploy.yml` does a complete deployment:
+- Creates (or updates) the `mkungi-api` and `mkungi-web` Vercel projects.
+- Sets every environment variable, generating `CRON_SECRET` and the IP-hash salt on the first run.
+- Makes both projects public.
+- Deploys the API and checks `/health`.
+- Deploys the web app pointed at the API, and checks its home page.
+- Optionally sets the Supabase sign-in redirect URLs.
+
+It runs again on every push to `main` that changes `backend/` or `frontend/`.
+
+1. In GitHub, go to **ericJeho/Mkungi → Settings → Secrets and variables → Actions → New repository secret**, and add:
+
+   | Secret | Where to get it |
+   |---|---|
+   | `VERCEL_TOKEN` | vercel.com → Account Settings → Tokens → Create |
+   | `SUPABASE_SECRET_KEY` | Supabase → Project Settings → API Keys → secret key (`sb_secret_…`) |
+   | `SUPABASE_ACCESS_TOKEN` (optional) | supabase.com/dashboard/account/tokens; lets the workflow set the sign-in Site URL and Redirect URLs for you |
+
+2. Go to **Actions → Deploy → Run workflow** (branch `main`).
+3. The run summary lists the web app and API URLs.
+
+Custom SMTP for sign-in emails (step 4.2 below) is still a manual step.
+
+The rest of this guide covers doing the same steps by hand in the dashboards.
+
 ## 1. Supabase
 
 **Done for production:** project `mkungi` (ref `wluzawxnsblsgllpkvrj`, org Jehosoft, region `eu-west-1`), URL `https://wluzawxnsblsgllpkvrj.supabase.co`, with the migration applied. Only step 3 (copy the secret key) is left. The steps below are for setting up another environment, such as staging.

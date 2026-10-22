@@ -1,0 +1,197 @@
+name: Deploy
+
+# Full production deployment to Vercel, wired to the mkungi Supabase project:
+#   1. API  (backend/)  -> Vercel project "mkungi-api"  (Python function)
+#   2. Web  (frontend/) -> Vercel project "mkungi-web"  (Next.js)
+#   3. Supabase Auth redirect URLs (optional, needs SUPABASE_ACCESS_TOKEN)
+# Creates the projects on first run; later runs update them. Safe to re-run.
+#
+# Repository secrets (Settings -> Secrets and variables -> Actions):
+#   VERCEL_TOKEN           required  vercel.com -> Account Settings -> Tokens
+#   SUPABASE_SECRET_KEY    required  Supabase -> Project Settings -> API Keys (sb_secret_...)
+#   SUPABASE_ACCESS_TOKEN  optional  supabase.com/dashboard/account/tokens (sets sign-in redirect URLs)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["backend/**", "frontend/**", ".github/workflows/deploy.yml"]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  VERCEL_CLI: vercel@62.7.0
+  API_PROJECT: mkungi-api
+  WEB_PROJECT: mkungi-web
+  SUPABASE_REF: wluzawxnsblsgllpkvrj
+  SUPABASE_URL: https://wluzawxnsblsgllpkvrj.supabase.co
+  # Publishable key: meant for browsers; RLS keeps it away from all Mkungi data.
+  SUPABASE_PUBLISHABLE_KEY: sb_publishable_JFjdquPoVqasMgrbm9XSXQ_5FHh0PbK
+  VERCEL_TELEMETRY_DISABLED: "1"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          missing=""
+          [ -n "$VERCEL_TOKEN" ] || missing="$missing VERCEL_TOKEN"
+          [ -n "$SUPABASE_SECRET_KEY" ] || missing="$missing SUPABASE_SECRET_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secrets:$missing (Settings -> Secrets and variables -> Actions)"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+
+      - name: Install Vercel CLI
+        run: npm install --global "$VERCEL_CLI"
+
+      - name: Helper functions
+        run: |
+          cat > "$RUNNER_TEMP/vc.sh" <<'EOF'
+          set -euo pipefail
+          vc() { vercel --token "$VERCEL_TOKEN" --non-interactive "$@"; }
+
+          # Create the project if needed and link the current directory to it.
+          link_project() {
+            vc project add "$1" >/dev/null 2>&1 || true
+            vc link --yes --project "$1" >/dev/null
+          }
+
+          # REST API call scoped like the linked project (personal account or team).
+          vapi() {
+            local method=$1 path=$2; shift 2
+            local org; org=$(jq -r .orgId .vercel/project.json)
+            local sep='?'; [[ "$path" == *\?* ]] && sep='&'
+            local scope=""; [[ "$org" == team_* ]] && scope="${sep}teamId=$org"
+            curl -fsS -X "$method" "https://api.vercel.com$path$scope" \
+              -H "Authorization: Bearer $VERCEL_TOKEN" -H "Content-Type: application/json" "$@"
+          }
+
+          # Public sites: turn off Vercel Authentication (Deployment Protection).
+          make_public() {
+            local id; id=$(jq -r .projectId .vercel/project.json)
+            vapi PATCH "/v9/projects/$id" -d '{"ssoProtection": null}' >/dev/null
+          }
+
+          # Production env var, overwritten each run (secrets stored as Sensitive).
+          set_env() {
+            local name=$1 value=$2 kind=${3:-plain}
+            local flag="--no-sensitive"; [ "$kind" = secret ] && flag="--sensitive"
+            vc env add "$name" production --value "$value" --force --yes $flag >/dev/null
+          }
+
+          # Production env var created once with a random value, then left alone.
+          ensure_random_env() {
+            if ! vc env ls production 2>/dev/null | grep -qw "$1"; then
+              set_env "$1" "$(openssl rand -hex 32)" secret
+            fi
+          }
+
+          # The project's stable production hostname (e.g. mkungi-api.vercel.app).
+          prod_host() {
+            local id; id=$(jq -r .projectId .vercel/project.json)
+            vapi GET "/v9/projects/$id/domains" | jq -r '[.domains[].name] | (map(select(endswith(".vercel.app") | not)) + map(select(endswith(".vercel.app"))))[0]'
+          }
+          EOF
+
+      - name: Deploy API
+        id: api
+        working-directory: backend
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          source "$RUNNER_TEMP/vc.sh"
+          link_project "$API_PROJECT"
+          make_public
+          set_env MKUNGI_SUPABASE_URL "$SUPABASE_URL"
+          set_env MKUNGI_SUPABASE_SECRET_KEY "$SUPABASE_SECRET_KEY" secret
+          set_env MKUNGI_CORS_ORIGINS '["http://localhost:3000"]'
+          set_env MKUNGI_CORS_ORIGIN_REGEX "https://${WEB_PROJECT}[a-z0-9-]*\\.vercel\\.app"
+          ensure_random_env CRON_SECRET
+          ensure_random_env MKUNGI_IP_HASH_SALT
+          vc deploy --prod --yes > "$RUNNER_TEMP/api-deploy.txt"
+          host=$(prod_host)
+          echo "url=https://$host" >> "$GITHUB_OUTPUT"
+          echo "API: https://$host"
+
+      - name: Check API health
+        run: |
+          url="${{ steps.api.outputs.url }}/health"
+          for i in $(seq 1 12); do
+            body=$(curl -fsS "$url" || true)
+            echo "$body"
+            if echo "$body" | jq -e '.status == "ok" and .storage == "supabase" and .auth == "required"' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$url did not report status ok / storage supabase / auth required"
+          exit 1
+
+      - name: Deploy web app
+        id: web
+        working-directory: frontend
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          source "$RUNNER_TEMP/vc.sh"
+          link_project "$WEB_PROJECT"
+          make_public
+          set_env NEXT_PUBLIC_API_URL "${{ steps.api.outputs.url }}"
+          set_env NEXT_PUBLIC_SUPABASE_URL "$SUPABASE_URL"
+          set_env NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY "$SUPABASE_PUBLISHABLE_KEY"
+          vc deploy --prod --yes > "$RUNNER_TEMP/web-deploy.txt"
+          host=$(prod_host)
+          echo "url=https://$host" >> "$GITHUB_OUTPUT"
+          echo "Web: https://$host"
+
+      - name: Check web app
+        run: |
+          url="${{ steps.web.outputs.url }}"
+          for i in $(seq 1 12); do
+            if curl -fsS "$url" | grep -q "From paper to perfectly editable"; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::$url did not serve the Mkungi home page"
+          exit 1
+
+      - name: Configure Supabase sign-in redirects
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
+            echo "::notice::SUPABASE_ACCESS_TOKEN not set: add ${{ steps.web.outputs.url }} as Site URL and Redirect URL in Supabase -> Authentication -> URL Configuration."
+            exit 0
+          fi
+          web="${{ steps.web.outputs.url }}"
+          allow="$web,$web/**,https://${WEB_PROJECT}-*.vercel.app/**,http://localhost:3000/**"
+          jq -n --arg site "$web" --arg allow "$allow" '{site_url: $site, uri_allow_list: $allow}' |
+            curl -fsS -X PATCH "https://api.supabase.com/v1/projects/$SUPABASE_REF/config/auth" \
+              -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" -H "Content-Type: application/json" -d @- >/dev/null
+          echo "Supabase Auth: site URL $web"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Mkungi deployment"
+            echo ""
+            echo "| | URL |"
+            echo "|---|---|"
+            echo "| Web app | ${{ steps.web.outputs.url || 'not deployed' }} |"
+            echo "| API | ${{ steps.api.outputs.url || 'not deployed' }} |"
+            echo "| API health | ${{ steps.api.outputs.url && format('{0}/health', steps.api.outputs.url) || '-' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

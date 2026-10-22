@@ -40,7 +40,7 @@ Signatures, stamps, QR codes and barcodes are always carried over as images, nev
 
 ## Deploy
 
-Production runs on **Supabase** (Postgres for jobs, Storage for files) and **Vercel** (two projects from this repo: `frontend/` as Next.js, `backend/` as a Python function). Step-by-step: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Production runs on **Supabase** (Postgres for jobs, Storage for files) and **Vercel** (two projects from this repo: `frontend/` as Next.js, `backend/` as a Python function). Add `VERCEL_TOKEN` and `SUPABASE_SECRET_KEY` as repository secrets, then run **Actions → Deploy**. The full steps, including the manual route, are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Run it locally
 
