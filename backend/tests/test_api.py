@@ -2,6 +2,7 @@
 
 import io
 import json
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import cv2
@@ -33,9 +34,24 @@ class FakeSupabase:
         self.objects: dict[str, bytes] = {}
         self.tokens: dict[str, str] = {}
 
-    def _filters(self, request: httpx.Request) -> dict[str, str]:
-        q = parse_qs(urlsplit(str(request.url)).query)
-        return {k: v[0].removeprefix("eq.") for k, v in q.items() if k != "select"}
+    def _match(self, request: httpx.Request) -> list[dict]:
+        """Apply PostgREST-style filters (eq, gte, lt, in), order and limit."""
+        q = {k: v[0] for k, v in parse_qs(urlsplit(str(request.url)).query).items()}
+        rows = list(self.rows.values())
+        for col, expr in q.items():
+            if col in ("select", "order", "limit"):
+                continue
+            op, _, val = expr.partition(".")
+            tests = {
+                "eq": lambda v, val=val: v == val,
+                "gte": lambda v, val=val: v is not None and v >= val,
+                "lt": lambda v, val=val: v is not None and v < val,
+                "in": lambda v, val=val: v in val.strip("()").split(","),
+            }
+            rows = [r for r in rows if tests[op](r.get(col))]
+        if "order" in q:
+            rows.sort(key=lambda r: r[q["order"].split(".")[0]])
+        return rows[: int(q["limit"])] if "limit" in q else rows
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = unquote(request.url.path)
@@ -43,14 +59,24 @@ class FakeSupabase:
         if path == "/rest/v1/conversions":
             assert authed
             if request.method == "POST":
-                row = {"created_at": "2026-10-16T00:00:00Z", **json.loads(request.content)}
+                row = {"created_at": datetime.now(timezone.utc).isoformat(), **json.loads(request.content)}
                 self.rows[row["id"]] = row
                 return httpx.Response(201, json=[row])
-            matches = [r for r in self.rows.values() if all(r.get(k) == v for k, v in self._filters(request).items())]
+            matches = self._match(request)
             if request.method == "PATCH":
                 for r in matches:
                     r.update(json.loads(request.content))
+            if request.method == "DELETE":
+                for r in matches:
+                    del self.rows[r["id"]]
             return httpx.Response(200, json=matches)
+
+        if request.method == "DELETE" and path.startswith("/storage/v1/object/"):
+            assert authed
+            bucket = path.removeprefix("/storage/v1/object/")
+            for prefix in json.loads(request.content)["prefixes"]:
+                self.objects.pop(f"{bucket}/{prefix}", None)
+            return httpx.Response(200, json=[])
 
         for prefix, kind in (
             ("/storage/v1/object/upload/sign/", "upload_sign"),
@@ -179,3 +205,75 @@ def test_validation(client, local_store):
     assert client.post("/v1/conversions", json={"filename": "x.png", "output_format": "pdf"}).status_code == 422
     assert client.get("/v1/conversions/not-a-uuid").status_code == 404
     assert client.get("/v1/conversions/00000000-0000-0000-0000-000000000000").status_code == 404
+
+
+def _backdate(store, job_id: str, hours: float) -> None:
+    """Make a job look older than it is."""
+    store.update(job_id, created_at=(datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat())
+
+
+@pytest.fixture(params=["local", "supabase"])
+def any_store(request, tmp_path, fake_supabase):
+    store = LocalStore(tmp_path) if request.param == "local" else fake_supabase[2]
+    main.app.dependency_overrides[main.store] = lambda: store
+    return store
+
+
+def test_rate_limit_per_visitor(client, any_store, monkeypatch):
+    monkeypatch.setattr(main.settings, "max_conversions_per_hour", 2)
+    for _ in range(2):
+        assert client.post("/v1/conversions", json={"filename": "a.png"}).status_code == 201
+    r = client.post("/v1/conversions", json={"filename": "a.png"})
+    assert r.status_code == 429 and r.headers["retry-after"] == "3600"
+    # Jobs older than an hour no longer count.
+    for job in any_store.expired(datetime.now(timezone.utc).isoformat(), 10):
+        _backdate(any_store, job["id"], 2)
+    assert client.post("/v1/conversions", json={"filename": "a.png"}).status_code == 201
+
+
+def test_rate_limit_keys_on_client(any_store, monkeypatch):
+    monkeypatch.setattr(main.settings, "max_conversions_per_hour", 1)
+    main.app.dependency_overrides[main.ocr_engine] = FakeEngine
+    try:
+        a = TestClient(main.app, client=("10.0.0.1", 1111))
+        b = TestClient(main.app, client=("10.0.0.2", 2222))
+        assert a.post("/v1/conversions", json={"filename": "a.png"}).status_code == 201
+        assert a.post("/v1/conversions", json={"filename": "a.png"}).status_code == 429
+        assert b.post("/v1/conversions", json={"filename": "b.png"}).status_code == 201
+        job = b.get("/v1/conversions/" + any_store.expired("9999", 10)[-1]["id"]).json()
+        assert "client_hash" not in job  # never exposed
+    finally:
+        main.app.dependency_overrides.clear()
+
+
+def test_cleanup_deletes_old_jobs_and_files(client, any_store, fake_supabase, invoice_png, monkeypatch):
+    monkeypatch.setattr(main.settings, "cron_secret", "s3cret")
+    old = client.post("/v1/conversions", json={"filename": "old.png", "output_format": "docx"}).json()
+    up = old["upload"]
+    if up["url"].startswith("/"):
+        client.request(up["method"], up["url"], content=invoice_png)
+    else:
+        any_store.http.request(up["method"], up["url"], content=invoice_png, headers=up["headers"])
+    assert client.post(f"/v1/conversions/{old['id']}/process").json()["status"] == "done"
+    new = client.post("/v1/conversions", json={"filename": "new.png"}).json()
+    _backdate(any_store, old["id"], 25)
+
+    if isinstance(any_store, SupabaseStore):
+        assert sum(old["id"] in k for k in fake_supabase[0].objects) == 2  # upload + output
+
+    assert client.get("/v1/maintenance/cleanup").status_code == 401
+    assert client.get("/v1/maintenance/cleanup", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    r = client.get("/v1/maintenance/cleanup", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200 and r.json()["deleted"] == 1
+
+    assert client.get(f"/v1/conversions/{old['id']}").status_code == 404
+    assert client.get(f"/v1/conversions/{new['id']}").status_code == 200
+    if isinstance(any_store, SupabaseStore):
+        assert any(old["id"] in k for k in fake_supabase[0].objects) is False  # upload and output both removed
+    else:
+        assert not (any_store.root / "jobs" / old["id"]).exists()
+
+
+def test_cleanup_disabled_without_secret(client, local_store):
+    main.app.dependency_overrides[main.store] = lambda: local_store
+    assert client.get("/v1/maintenance/cleanup", headers={"Authorization": "Bearer "}).status_code == 401

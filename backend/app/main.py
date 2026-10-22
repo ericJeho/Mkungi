@@ -12,6 +12,11 @@ Then ``GET /v1/conversions/{id}/download`` returns the Word/Excel file.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
+import time
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -56,7 +61,22 @@ def _get(s: Store, job_id: str) -> dict:
 
 
 def _public(job: dict) -> dict:
-    return {k: v for k, v in job.items() if k not in ("input_path", "output_path")}
+    return {k: v for k, v in job.items() if k not in ("input_path", "output_path", "client_hash")}
+
+
+def _ago(hours: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+def client_hash(request: Request) -> str:
+    """A salted hash of the visitor's IP: enough to rate-limit, without storing the IP.
+
+    On Vercel the edge sets x-real-ip itself, so it can't be spoofed by the client.
+    Elsewhere the socket address is used (put a trusted proxy in front if needed).
+    """
+    ip = request.headers.get("x-real-ip") if os.getenv("VERCEL") else None
+    ip = ip or (request.client.host if request.client else "unknown")
+    return hashlib.sha256(f"{settings.ip_hash_salt}:{ip}".encode()).hexdigest()[:32]
 
 
 class CreateConversion(BaseModel):
@@ -74,12 +94,25 @@ def health() -> dict:
 
 
 @app.post("/v1/conversions", status_code=201)
-def create_conversion(body: CreateConversion, s: Store = Depends(store)) -> dict:
+def create_conversion(body: CreateConversion, request: Request, s: Store = Depends(store)) -> dict:
     filename = Path(body.filename).name.strip()
     if not filename or Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
         raise HTTPException(415, f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_SUFFIXES))}")
-    job = s.create(filename, body.output_format)
-    return {**_public(job), "upload": s.upload_target(job), "max_upload_mb": settings.max_upload_mb}
+    who = client_hash(request)
+    limit = settings.max_conversions_per_hour
+    if limit and s.count_recent(who, _ago(1), limit) >= limit:
+        raise HTTPException(
+            429,
+            f"You've reached the limit of {limit} conversions per hour. Please try again later.",
+            headers={"Retry-After": "3600"},
+        )
+    job = s.create(filename, body.output_format, who)
+    return {
+        **_public(job),
+        "upload": s.upload_target(job),
+        "max_upload_mb": settings.max_upload_mb,
+        "retention_hours": settings.retention_hours,
+    }
 
 
 @app.put("/v1/conversions/{job_id}/upload", status_code=204)
@@ -154,3 +187,21 @@ def download(job_id: str, s: Store = Depends(store)) -> FileResponse | RedirectR
         media_type=MEDIA_TYPES[job["output_format"]],
         filename=job["output_file"],
     )
+
+
+@app.get("/v1/maintenance/cleanup")
+def cleanup(request: Request, s: Store = Depends(store)) -> dict:
+    """Delete jobs and files past the retention period. Called daily by Vercel Cron."""
+    expected = f"Bearer {settings.cron_secret}" if settings.cron_secret else None
+    given = request.headers.get("authorization", "")
+    if not expected or not hmac.compare_digest(given.encode(), expected.encode()):
+        raise HTTPException(401, "Unauthorized")
+    before, deleted, started = _ago(settings.retention_hours), 0, time.monotonic()
+    # Work in batches and stop well inside the function's time limit; the next run continues.
+    while time.monotonic() - started < 120:
+        batch = s.expired(before, 100)
+        if not batch:
+            break
+        s.delete(batch)
+        deleted += len(batch)
+    return {"deleted": deleted, "before": before}

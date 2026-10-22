@@ -7,5 +7,16 @@
       "excludeFiles": "{tests/**,storage/**,**/__pycache__/**,Dockerfile,*.md}"
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/v1/maintenance/cleanup",
+      "schedule": "17 3 * * *"
+    }
+  ]
 }

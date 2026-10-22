@@ -61,8 +61,8 @@ Source: the Mkungi product brief ([PRODUCT.md](PRODUCT.md)). Each phase ends wit
 - [x] Supabase Storage: private `uploads` / `outputs` buckets; browser uploads via signed URLs, downloads via 5-minute signed URLs
 - [x] Deployment: Vercel projects for `frontend/` (Next.js) and `backend/` (Python function), see [DEPLOYMENT.md](DEPLOYMENT.md)
 - [ ] Supabase Auth: sign-in, and jobs owned by a user (`user_id` + RLS policies)
-- [ ] Per-user quotas so public traffic can't exhaust Vercel compute
-- [ ] Retention: scheduled deletion of uploads and outputs after N days
+- [x] Per-visitor rate limit (30 conversions/hour on a salted IP hash) so public traffic can't exhaust Vercel compute; per-user quotas follow sign-in
+- [x] Retention: daily Vercel Cron deletes jobs, uploads and outputs older than 24 hours
 - [ ] Background workers for long documents (> 20 pages or > 300 s): a queue (Supabase Queues / pgmq) and a worker outside Vercel
 - [ ] Accounts, organisations and teams; roles (owner, admin, member)
 - [ ] API keys, per-key rate limits and usage metering

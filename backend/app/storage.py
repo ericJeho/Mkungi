@@ -10,6 +10,7 @@ function's 4.5 MB request limit.
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +35,19 @@ def now() -> str:
 
 
 class Store(Protocol):
-    def create(self, filename: str, requested_format: str) -> dict: ...
+    def create(self, filename: str, requested_format: str, client_hash: str | None = None) -> dict: ...
+
+    def count_recent(self, client_hash: str, since: str, cap: int) -> int:
+        """Jobs this client created since ``since`` (ISO time), counting at most ``cap``."""
+        ...
+
+    def expired(self, before: str, limit: int) -> list[dict]:
+        """Up to ``limit`` jobs created before ``before`` (ISO time), oldest first."""
+        ...
+
+    def delete(self, jobs: list[dict]) -> None:
+        """Remove the jobs and their uploaded and converted files."""
+        ...
 
     def get(self, job_id: str) -> dict: ...
 
@@ -91,7 +104,7 @@ class LocalStore:
         (self._dir(job["id"]) / "job.json").write_text(json.dumps(job, indent=2))
         return job
 
-    def create(self, filename: str, requested_format: str) -> dict:
+    def create(self, filename: str, requested_format: str, client_hash: str | None = None) -> dict:
         job_id = str(uuid.uuid4())
         self._dir(job_id).mkdir(parents=True)
         return self._save(
@@ -101,9 +114,23 @@ class LocalStore:
                 "filename": filename,
                 "requested_format": requested_format,
                 "input_path": _input_path(job_id, filename),
+                "client_hash": client_hash,
                 "created_at": now(),
             }
         )
+
+    def _all(self) -> list[dict]:
+        return [json.loads(p.read_text()) for p in (self.root / "jobs").glob("*/job.json")]
+
+    def count_recent(self, client_hash: str, since: str, cap: int) -> int:
+        return min(cap, sum(1 for j in self._all() if j.get("client_hash") == client_hash and j["created_at"] >= since))
+
+    def expired(self, before: str, limit: int) -> list[dict]:
+        return sorted((j for j in self._all() if j["created_at"] < before), key=lambda j: j["created_at"])[:limit]
+
+    def delete(self, jobs: list[dict]) -> None:
+        for job in jobs:
+            shutil.rmtree(self._dir(job["id"]), ignore_errors=True)
 
     def get(self, job_id: str) -> dict:
         path = self._dir(job_id) / "job.json"
@@ -180,7 +207,7 @@ class SupabaseStore:
         except ValueError:
             raise JobNotFound(job_id) from None
 
-    def create(self, filename: str, requested_format: str) -> dict:
+    def create(self, filename: str, requested_format: str, client_hash: str | None = None) -> dict:
         job_id = str(uuid.uuid4())
         rows = self._rest(
             "POST",
@@ -190,9 +217,36 @@ class SupabaseStore:
                 "filename": filename,
                 "requested_format": requested_format,
                 "input_path": _input_path(job_id, filename),
+                "client_hash": client_hash,
             },
         )
         return rows[0]
+
+    def count_recent(self, client_hash: str, since: str, cap: int) -> int:
+        params = {"client_hash": f"eq.{client_hash}", "created_at": f"gte.{since}", "select": "id", "limit": str(cap)}
+        return len(self._rest("GET", params=params))
+
+    def expired(self, before: str, limit: int) -> list[dict]:
+        params = {
+            "created_at": f"lt.{before}",
+            "select": "id,input_path,output_path",
+            "order": "created_at.asc",
+            "limit": str(limit),
+        }
+        return self._rest("GET", params=params)
+
+    def delete(self, jobs: list[dict]) -> None:
+        if not jobs:
+            return
+        # Files first: a row without files is harmless, files without a row are orphans.
+        for bucket, key in ((self.input_bucket, "input_path"), (self.output_bucket, "output_path")):
+            paths = [j[key] for j in jobs if j.get(key)]
+            if paths:
+                r = self.http.request(
+                    "DELETE", f"{self.base}/storage/v1/object/{bucket}", headers=self.headers, json={"prefixes": paths}
+                )
+                r.raise_for_status()
+        self._rest("DELETE", params={"id": f"in.({','.join(j['id'] for j in jobs)})"})
 
     def get(self, job_id: str) -> dict:
         self._check_id(job_id)

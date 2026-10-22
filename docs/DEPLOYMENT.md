@@ -38,10 +38,12 @@
    | `MKUNGI_SUPABASE_SECRET_KEY` | `sb_secret_…` (mark as Sensitive) |
    | `MKUNGI_CORS_ORIGINS` | `["https://<your-web-domain>"]` |
    | `MKUNGI_CORS_ORIGIN_REGEX` | `https://mkungi-web(-[a-z0-9-]+)?\.vercel\.app` (allows preview deployments) |
+   | `CRON_SECRET` | a long random string, e.g. `openssl rand -hex 32` (Vercel sends it to the daily clean-up) |
+   | `MKUNGI_IP_HASH_SALT` | another random string (salts the visitor hash used for rate limiting) |
 
 4. Deploy, then open `https://<api-domain>/health`. It should return `"storage": "supabase"`.
 
-`backend/vercel.json` sets the function to 300 s and 2 GB, and routes every path to `api/index.py`.
+`backend/vercel.json` sets the function to 300 s and 2 GB, routes every path to `api/index.py`, and schedules the daily clean-up (03:17 UTC) under *Settings → Cron Jobs*.
 
 ## 3. Vercel: web project
 
@@ -60,12 +62,13 @@ In both projects, turn on *Settings → Git → Ignored Build Step → "Only bui
 | Pages per document | 20 | `MKUNGI_MAX_PAGES` |
 | Conversion time | 300 s | `backend/vercel.json` (`maxDuration`; Pro plans can raise it to 800) |
 | Function memory | 2 GB | `backend/vercel.json` |
+| Conversions per visitor | 30 per hour (HTTP 429 after) | `MKUNGI_MAX_CONVERSIONS_PER_HOUR` |
+| File retention | 24 h; the clean-up runs daily, so files go within 48 h at most | `MKUNGI_RETENTION_HOURS`, `crons` in `backend/vercel.json` |
 
 ## Before opening it to the public
 
-- **Sign-in and quotas.** Right now anyone with the URL can convert documents, which uses your Vercel compute. Add Supabase Auth and per-user limits (build checklist, phase 2).
-- **Retention.** Uploaded scans and outputs stay in Storage until deleted. Add a scheduled clean-up that deletes files older than N days.
-- Job ids are random UUIDs and downloads use 5-minute signed URLs, but anyone holding a job id can fetch its result until retention removes it.
+- **Abuse limit and retention are built in:** 30 conversions per visitor per hour, and a daily Vercel Cron job deletes jobs and files older than 24 hours. The clean-up only runs if `CRON_SECRET` is set.
+- **Sign-in** is still to do (build checklist, phase 2). Until then anyone can convert within the hourly limit, and anyone holding a job id can fetch its result until the clean-up removes it. Job ids are random UUIDs, and downloads use 5-minute signed URLs.
 
 ## Local development
 

@@ -128,6 +128,7 @@ export default function Converter() {
       >
         <span className="text-base font-semibold text-ink">Drop scans here or click to upload</span>
         <span className="mt-1 text-sm text-ink-soft">PDF, JPG, PNG or TIFF · up to 25 MB · several files at once</span>
+        <span className="mt-2 text-xs text-ink-soft">Your files are deleted automatically after 24 hours.</span>
       </button>
       <input
         ref={input}

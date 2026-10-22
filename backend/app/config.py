@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,16 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
     # Matches Vercel preview deployments of the web app, e.g. https://mkungi-web-git-x-team.vercel.app
     cors_origin_regex: str | None = None
+
+    # Abuse limit: conversions each visitor (hashed IP) may start per hour; 0 turns it off.
+    max_conversions_per_hour: int = 30
+    ip_hash_salt: str = "mkungi"
+
+    # Retention: jobs and their files are deleted this long after creation by
+    # /v1/maintenance/cleanup, which Vercel Cron calls daily (vercel.json).
+    retention_hours: int = 24
+    # Vercel sends "Authorization: Bearer $CRON_SECRET" on cron requests.
+    cron_secret: str | None = Field(None, validation_alias=AliasChoices("MKUNGI_CRON_SECRET", "CRON_SECRET"))
 
     # Supabase (production). When url and secret key are both set, jobs go to
     # Postgres and files to Storage; otherwise everything stays in storage_dir.
